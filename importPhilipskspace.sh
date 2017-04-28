@@ -20,33 +20,41 @@
 ####
 
 #####
-#Adjust paths here, ifneeded
+#Adjust paths here, if needed
 kspacedir=/data/site/k-space-data-store
 daicdir=/data/DAIC
 rawdir=/data/site/raw
 tdir=/tmp/$$
 #############
 
+###############
 #Create temporary dir for deletion later
 echo "TEMPDIR: ${tdir}"
 mkdir ${tdir}
+###############
 
-#Create list of subjects found $kspacedir
+###############
+#Create list from subject found in $kspacedir
 cd ${kspacedir}
 ls -d NDAR* > ${tdir}/subjectlist
+###############
 
-# Generate list of subjects found in ${rawdir} to compare the kspace subjectlist to
+###############
+#Create list of subjects found in $rawdir json files to $tmpfile
 cd ${rawdir}
 tmpfile=$(mktemp ${tdir}/abcd-rawlist.XXXXXX)                                    
 jq -r "[.PatientName,.PatientID,.StudyInstanceUID,.SeriesInstanceUID,.SeriesNumber] | @csv" */*.json > ${tmpfile} 
+###############
 
-#Loop through subjectlist
+###############
+#Loop through Subjects found in subjeclist
 for PatientName in `cat ${tdir}/subjectlist`
 do
+
    #Proceed only if subject is found in both the subjectlist and $tmpfile
    if cat ${tmpfile} | grep ${PatientName} &> /dev/null; then
       echo "Working on: ${PatientName}"
-      #Loop through json outputs from $rawdir
+      #Loop through $tmpfile json for each Subject
       for json in `cat ${tmpfile} | grep ${PatientName}`
       do
           StudyInstanceUID=`echo ${json} | awk -F'"' '{print $6}'`
@@ -63,8 +71,14 @@ do
           #Time	
           t=`echo ${dt} | cut -c 9-14`
           	  	  
-	  	 
-          #If Date/Time is matches filename in kspacedir then bundle files into tgz file
+	  	  #################
+	  	  # Philips kspace files are in the format
+	  	  #				<date>_<time>_<series name type>.raw  They are accompanied with .sin, .lab files as well
+	  	  #				e.g.   20170225_11829_113050_3D_T1.raw
+	  	  #		NOTE: The correct CoilSurvey and SenseRef files need to be bundled with each series.
+	  	  #					coca = SenseRef. coil = CoilSurvey. Coilsurvey is only found in DTI. SenseRef is part of all scans.
+	  	  #################
+          #If Date/Time is matches filename in $kspacedir then bundle files into tgz file
           if ls ${kspacedir}/${PatientName}/*${d}*${t}* &> /dev/null; then
             	#Build filename
 	        	fn=SUID_${StudyInstanceUID}_subjid_${PatientName}_${SeriesInstanceUID}_se${SeriesNumber}_${d2}_${t}
@@ -72,11 +86,26 @@ do
           		if hash pigz 2>/dev/null; then
           			cd ${kspacedir}/${PatientName}
           			file=`echo *${d}*${t}*.raw`
-                	tar cf - *${d}*${t}* | pigz --fast -p 6 > ${tdir}/${fn}.tgz
-          			md5sum ${tdir}/${fn}.tgz  > ${tdir}/${fn}.md5sum
-          			echo "{ \"PatientName\": \"$PatientName\", \"SeriesInstanceUID\": \"${SeriesInstanceUID}\", \"StudyInstanceUID\": \"${StudyInstanceUID}\", \"dat\": \"${file}\", \"type\": \"Philips k-space\" }" > ${tdir}/${fn}.json
-          			mv ${tdir}/${fn}* /data/quarantine
-	  				packval=$?
+          			echo ${file}
+          			# 
+          			if cat ${file%.*}.sin | grep coil_survey_cpx_file_names &>/dev/null; then 
+          				coil=`cat ${file%.*}.sin | grep coil_survey_cpx_file_names | cut -d':' -f3  | cut -d '.' -f1`
+                		coca=`cat ${file%.*}.sin | grep coca_cpx_file_names | cut -d':' -f3  | cut -d '.' -f1`
+                		echo "Bundling $coca and $coil into ${fn} tgz..."
+                		tar cf - *${d}*${t}* ${coca}* ${coil}* | pigz --fast -p 6 > ${tdir}/${fn}.tgz
+          				md5sum ${tdir}/${fn}.tgz  > ${tdir}/${fn}.md5sum
+          				echo "{ \"PatientName\": \"$PatientName\", \"SeriesInstanceUID\": \"${SeriesInstanceUID}\", \"StudyInstanceUID\": \"${StudyInstanceUID}\", \"dat\": \"${file}\", \"type\": \"Philips k-space\" }" > ${tdir}/${fn}.json
+          				mv ${tdir}/${fn}* /data/quarantine
+	  					packval=$?
+	  				else
+	  					coca=`cat ${file%.*}.sin | grep coca_cpx_file_names | cut -d':' -f3  | cut -d '.' -f1`
+	  					echo "Bundling $coca into ${fn} tgz..."
+	  					tar cf - *${d}*${t}* ${coca}* | pigz --fast -p 6 > ${tdir}/${fn}.tgz
+          				md5sum ${tdir}/${fn}.tgz  > ${tdir}/${fn}.md5sum
+          				echo "{ \"PatientName\": \"$PatientName\", \"SeriesInstanceUID\": \"${SeriesInstanceUID}\", \"StudyInstanceUID\": \"${StudyInstanceUID}\", \"dat\": \"${file}\", \"type\": \"Philips k-space\" }" > ${tdir}/${fn}.json
+          				mv ${tdir}/${fn}* /data/quarantine
+	  					packval=$?
+	  				fi
       	  		else
 	  				GZIP=-1 tar cvzf ${tdir}/${fn}.tgz *${d}*${t}*
 	  				mv ${tdir}/${fn}* /data/quarantine
@@ -97,9 +126,12 @@ do
           cd -
       done
    fi
+   ##############
+   # Cleanup $kspacedir
    # For now move subject to 'transferred' subdir. Later on, change this to rm
    mv ${kspacedir}/${PatientName} ${kspacedir}/transferred
 done
 
-#Cleanup
+#############
+#Cleanup $tdir
 rm -R ${tdir}
